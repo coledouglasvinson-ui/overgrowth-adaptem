@@ -4,7 +4,7 @@ To compile and run Overgrowth, you first need to have installed a commercial ver
 If you're on steam, you'll also want to make sure you're using the internal_testing branch to have the latest set of data-files for the game.
 The reason for this is that you want the Data/ folder from the game.
 
-These instructions assume you've already managed to download the project and have it in a local folder. There's no need to try and initialize the submodules unless you are an official developer of Wolfire, as those repos are private and primarily used by the build system for deployment. Make sure that the folder depth isn't too great, as this can cause some issues. From now we'll assume you've downloaded the repo into the following folder on windows ```C:\overgrowth``` and ```~/overgrowth``` on unix-like systems.
+These instructions assume you've already managed to download the project and have it in a local folder. The Auxiliary and Proprietary submodules are private Wolfire repositories and are not required for a normal non-Steamworks development build. Do not initialize them unless you have access and need them. Make sure the folder depth isn't too great, as this can cause some issues. From now we'll assume you've downloaded the repo into the following folder on windows ```C:\overgrowth``` and ```~/overgrowth``` on unix-like systems.
 
 # Dependencies
 
@@ -40,15 +40,17 @@ The following command should install all necessary dependencies to build Overgro
 
 1. Make sure you have an installed copy of Overgrowth and find the path to the install. If you've installed the game via Steam you can get the path by right clicking the game in the Steam games list, press Properties, go to Local Files and press Browse. This will open explorer window with the game path, copy that path into your clipboard. example: ```E:\SteamLibrary\steamapps\common\Overgrowth```
 
-2. Go to the Overgrowth git repo folder and create a new subfolder named "Build" example ```C:\overgrowth\Build```
+2. Open PowerShell in the repository folder. The folder should contain `Projects` and `COMPILING.md`.
 
-3. Open a windows cmd (alternatively a git bash console) in the build folder you just created.
+3. Configure the build, replacing the example Steam path if yours is different:
 
-4. Run the following command ```cmake ../Projects -DAUX_DATA="E:/SteamLibrary/steamapps/common/Overgrowth"```. Replace the path with your own Overgrowth install, and switch the path separators from ```\``` to ```/```
+   ```powershell
+   cmake -S Projects -B Build -DAUX_DATA="C:\Program Files (x86)\Steam\steamapps\common\Overgrowth"
+   ```
 
-5. Open the generated ```Overgrowth.sln``` file using Visual Studio 2022
+4. Open `Build\Overgrowth.sln` in Visual Studio.
 
-6. Press the "Local Windows Debugger" button to compile and start the game.
+5. Press **Local Windows Debugger** to compile and start the game.
 
 ## MacOSX
 

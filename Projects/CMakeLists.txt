@@ -15,6 +15,9 @@
 #-----------------------------------------------------------------------------
 CMAKE_MINIMUM_REQUIRED(VERSION 3.5) #Version of cmake in steam-runtime
 
+# Newer CMake releases removed compatibility modes used by bundled legacy libraries.
+SET(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
