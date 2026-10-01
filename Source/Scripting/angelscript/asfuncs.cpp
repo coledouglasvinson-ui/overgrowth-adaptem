@@ -164,7 +164,7 @@ static std::string AS_SocketTCPDataToString(const CScriptArray& data) {
     std::string result;
     result.reserve(data.GetSize());
     for (asUINT i = 0; i < data.GetSize(); ++i) {
-        result.push_back(static_cast<char>(*static_cast<uint8_t*>(data.At(i))));
+        result.push_back(static_cast<char>(*static_cast<const uint8_t*>(data.At(i))));
     }
     return result;
 }
