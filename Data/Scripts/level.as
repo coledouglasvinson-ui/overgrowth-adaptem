@@ -48,6 +48,17 @@ IMGUI@ imGUI;
 
 string font_path = "Data/Fonts/Lato-Regular.ttf";
 string name_font_path = "Data/Fonts/edosz.ttf";
+uint adaptive_ai_socket = SOCKET_ID_INVALID;
+bool adaptive_ai_enabled = false;
+bool adaptive_ai_waiting_for_action = false;
+bool adaptive_ai_reset_pending = false;
+bool adaptive_ai_start_pending = false;
+bool adaptive_ai_pending_transition = false;
+int adaptive_ai_target_id = -1;
+int adaptive_ai_pending_state = 0;
+float adaptive_ai_pending_reward = 0.0f;
+bool adaptive_ai_pending_terminal = false;
+string adaptive_ai_input_buffer;
 
 
 
@@ -56,6 +67,222 @@ class DialogueTextCanvas {
     int obj_id;
     int canvas_id;
 };
+
+void AdaptiveAIDisable(string reason) {
+    if(adaptive_ai_socket != SOCKET_ID_INVALID && IsValidSocketTCP(adaptive_ai_socket)) {
+        DestroySocketTCP(adaptive_ai_socket);
+    }
+    adaptive_ai_socket = SOCKET_ID_INVALID;
+    adaptive_ai_enabled = false;
+    adaptive_ai_waiting_for_action = false;
+    adaptive_ai_reset_pending = false;
+    adaptive_ai_start_pending = false;
+    adaptive_ai_pending_transition = false;
+    adaptive_ai_target_id = -1;
+    adaptive_ai_input_buffer = "";
+    SetAdaptiveAIPaused(false);
+    if(reason != "") {
+        Log(warning, "Adaptive AI training bridge disabled: " + reason);
+    }
+}
+
+bool AdaptiveAISend(string message) {
+    if(!adaptive_ai_enabled || !IsValidSocketTCP(adaptive_ai_socket)) {
+        AdaptiveAIDisable("connection closed");
+        return false;
+    }
+
+    if(SocketTCPSendString(adaptive_ai_socket, message) != int(message.length())) {
+        AdaptiveAIDisable("send failed");
+        return false;
+    }
+
+    return true;
+}
+
+void AdaptiveAIQueueTransition(string message) {
+    TokenIterator token_iter;
+    token_iter.Init();
+    if(!token_iter.FindNextToken(message) || !token_iter.FindNextToken(message)) {
+        return;
+    }
+    int character_id = atoi(token_iter.GetToken(message));
+    if(!token_iter.FindNextToken(message)) {
+        return;
+    }
+    int state = atoi(token_iter.GetToken(message));
+    if(!token_iter.FindNextToken(message)) {
+        return;
+    }
+    float reward = atof(token_iter.GetToken(message));
+    if(!token_iter.FindNextToken(message)) {
+        return;
+    }
+    bool terminal = atoi(token_iter.GetToken(message)) != 0;
+
+    if(!adaptive_ai_enabled || character_id != adaptive_ai_target_id || state < 0 || state >= 8) {
+        return;
+    }
+
+    if(adaptive_ai_pending_transition) {
+        adaptive_ai_pending_reward += reward;
+        adaptive_ai_pending_state = state;
+        adaptive_ai_pending_terminal = adaptive_ai_pending_terminal || terminal;
+    } else {
+        adaptive_ai_pending_transition = true;
+        adaptive_ai_pending_state = state;
+        adaptive_ai_pending_reward = reward;
+        adaptive_ai_pending_terminal = terminal;
+    }
+}
+
+bool AdaptiveAISelectTarget() {
+    if(!adaptive_ai_enabled || !adaptive_ai_start_pending) {
+        return false;
+    }
+    for(int i = 0; i < GetNumCharacters(); ++i) {
+        MovementObject@ character = ReadCharacter(i);
+        if(character.HasFunction("int IsAdaptiveCombatant()") &&
+           character.QueryIntFunction("int IsAdaptiveCombatant()") == 1 &&
+           character.HasFunction("int GetAdaptiveCombatStateForBridge()")) {
+            adaptive_ai_target_id = character.GetID();
+            adaptive_ai_pending_state = character.QueryIntFunction("int GetAdaptiveCombatStateForBridge()");
+            adaptive_ai_pending_transition = true;
+            adaptive_ai_waiting_for_action = false;
+            adaptive_ai_start_pending = false;
+            SetAdaptiveAIPaused(true);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void AdaptiveAIStart() {
+    if(!adaptive_ai_enabled) {
+        return;
+    }
+
+    adaptive_ai_target_id = -1;
+    adaptive_ai_start_pending = true;
+    adaptive_ai_pending_transition = false;
+    adaptive_ai_pending_reward = 0.0f;
+    adaptive_ai_pending_terminal = false;
+    SetAdaptiveAIPaused(false);
+    AdaptiveAISelectTarget();
+}
+
+void AdaptiveAIHandleCommand(string command) {
+    TokenIterator token_iter;
+    token_iter.Init();
+    if(!token_iter.FindNextToken(command)) {
+        return;
+    }
+
+    string token = token_iter.GetToken(command);
+    if(token == "START") {
+        AdaptiveAIStart();
+    } else if(token == "ACTION") {
+        if(!token_iter.FindNextToken(command)) {
+            AdaptiveAISend("ERROR invalid_action\n");
+            return;
+        }
+        int character_id = atoi(token_iter.GetToken(command));
+        if(!token_iter.FindNextToken(command)) {
+            AdaptiveAISend("ERROR invalid_action\n");
+            return;
+        }
+        int action = atoi(token_iter.GetToken(command));
+        if(adaptive_ai_waiting_for_action && character_id == adaptive_ai_target_id && action >= 0 && action < 4 &&
+           ObjectExists(character_id)) {
+            ReadCharacterID(character_id).ReceiveScriptMessage("adaptive_rl_action " + action);
+            adaptive_ai_waiting_for_action = false;
+            SetAdaptiveAIPaused(false);
+        } else {
+            AdaptiveAISend("ERROR invalid_action\n");
+        }
+    } else if(token == "RESET") {
+        adaptive_ai_target_id = -1;
+        adaptive_ai_start_pending = false;
+        adaptive_ai_reset_pending = true;
+        adaptive_ai_pending_transition = false;
+        adaptive_ai_pending_reward = 0.0f;
+        adaptive_ai_pending_terminal = false;
+        adaptive_ai_waiting_for_action = false;
+        SetAdaptiveAIPaused(false);
+        level.SendMessage("reset");
+    } else if(token == "ABORT") {
+        AdaptiveAIDisable("trainer disconnected");
+    }
+}
+
+void AdaptiveAIInitialize() {
+    if(!GetConfigValueBool("adaptive_ai_training")) {
+        return;
+    }
+    if(Online_IsActive()) {
+        Log(warning, "Adaptive AI training is available only in single-player.");
+        return;
+    }
+
+    int port = GetConfigValueInt("adaptive_ai_training_port");
+    if(port < 1 || port > 65535) {
+        Log(warning, "Adaptive AI training port must be between 1 and 65535.");
+        return;
+    }
+
+    string host = "127.0.0.1";
+    adaptive_ai_socket = CreateSocketTCP(host, uint16(port));
+    if(adaptive_ai_socket == SOCKET_ID_INVALID) {
+        Log(warning, "Adaptive AI training server was not reachable on localhost.");
+        return;
+    }
+
+    adaptive_ai_enabled = true;
+    AdaptiveAISend("HELLO 1\n");
+}
+
+void AdaptiveAIShutdown() {
+    if(adaptive_ai_socket != SOCKET_ID_INVALID && IsValidSocketTCP(adaptive_ai_socket)) {
+        DestroySocketTCP(adaptive_ai_socket);
+    }
+    adaptive_ai_socket = SOCKET_ID_INVALID;
+    adaptive_ai_enabled = false;
+    adaptive_ai_target_id = -1;
+    adaptive_ai_reset_pending = false;
+    adaptive_ai_start_pending = false;
+    adaptive_ai_pending_transition = false;
+    adaptive_ai_waiting_for_action = false;
+    SetAdaptiveAIPaused(false);
+}
+
+void IncomingTCPData(uint socket, array<uint8>@ data) {
+    if(!adaptive_ai_enabled || socket != adaptive_ai_socket) {
+        return;
+    }
+
+    adaptive_ai_input_buffer += SocketTCPDataToString(data);
+    while(true) {
+        int newline = adaptive_ai_input_buffer.findFirst("\n");
+        if(newline == -1) {
+            break;
+        }
+        if(newline + 1 > 128) {
+            AdaptiveAIDisable("incoming message exceeded limit");
+            return;
+        }
+        string command = adaptive_ai_input_buffer.substr(0, newline);
+        adaptive_ai_input_buffer = adaptive_ai_input_buffer.substr(newline + 1);
+        AdaptiveAIHandleCommand(command);
+        if(!adaptive_ai_enabled) {
+            return;
+        }
+    }
+
+    if(adaptive_ai_input_buffer.length() > 256) {
+        AdaptiveAIDisable("incoming message exceeded limit");
+    }
+}
 
 array<DialogueTextCanvas> dialogue_text_canvases;
 
@@ -115,6 +342,7 @@ void Init(string p_level_name) {
     @imGUI = CreateIMGUI();
     dialogue.Init();
     imGUI.setup();
+    AdaptiveAIInitialize();
 }
 
 int HasCameraControl() {
@@ -155,6 +383,9 @@ void ReceiveMessage(string msg) {
         has_display_text = false;
     } else if(token == "dispose_level"){
         has_gui = false;
+        AdaptiveAIShutdown();
+    } else if(token == "adaptive_ai_transition"){
+        AdaptiveAIQueueTransition(msg);
     } else if(token == "disable_retry"){
         allow_retry = false;
     } else if(token == "go_to_main_menu"){
@@ -395,6 +626,30 @@ void DrawGUI3() {
 
 bool capture_input = false;
 void Update(int paused) {
+    if(adaptive_ai_enabled) {
+        if(!IsValidSocketTCP(adaptive_ai_socket)) {
+            AdaptiveAIDisable("connection closed");
+        } else if(adaptive_ai_reset_pending) {
+            adaptive_ai_reset_pending = false;
+            SetAdaptiveAIPaused(true);
+            AdaptiveAISend("RESET_OK\n");
+        } else {
+            AdaptiveAISelectTarget();
+        }
+
+        if(adaptive_ai_enabled && adaptive_ai_pending_transition && !adaptive_ai_waiting_for_action) {
+            string observation = "OBS " + adaptive_ai_target_id + " " + adaptive_ai_pending_state + " " +
+                                adaptive_ai_pending_reward + " " + (adaptive_ai_pending_terminal ? 1 : 0) + "\n";
+            if(AdaptiveAISend(observation)) {
+                adaptive_ai_pending_transition = false;
+                adaptive_ai_pending_reward = 0.0f;
+                adaptive_ai_pending_terminal = false;
+                adaptive_ai_waiting_for_action = true;
+                SetAdaptiveAIPaused(true);
+            }
+        }
+    }
+
     const bool kDialogueQueueDebug = false;
     if(kDialogueQueueDebug){
         string str;

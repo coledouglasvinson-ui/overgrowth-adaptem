@@ -1,0 +1,4 @@
+<Actor>
+    <Character>Data/Characters/male_rabbit_1.xml</Character>
+    <ControlScript>adaptem_red_enemycontrol.as</ControlScript>
+</Actor>

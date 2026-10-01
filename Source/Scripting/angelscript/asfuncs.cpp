@@ -155,6 +155,29 @@ static int AS_SocketTCPSend(uint32_t socket, const CScriptArray& array) {
     return ret;
 }
 
+static int AS_SocketTCPSendString(uint32_t socket, const std::string& data) {
+    return Engine::Instance()->GetASNetwork()->SocketTCPSend(
+        socket, reinterpret_cast<const uint8_t*>(data.data()), data.size());
+}
+
+static std::string AS_SocketTCPDataToString(const CScriptArray& data) {
+    std::string result;
+    result.reserve(data.GetSize());
+    for (asUINT i = 0; i < data.GetSize(); ++i) {
+        result.push_back(static_cast<char>(*static_cast<uint8_t*>(data.At(i))));
+    }
+    return result;
+}
+
+static void AS_SetAdaptiveAIPaused(bool paused) {
+    Engine* engine = Engine::Instance();
+    if (Online::Instance()->IsActive()) {
+        return;
+    }
+    engine->adaptive_ai_paused = paused;
+    engine->CommitPause();
+}
+
 static bool AS_IsValidSocketTCP(uint32_t socket) {
     return Engine::Instance()->GetASNetwork()->IsValidSocketTCP(socket);
 }
@@ -198,6 +221,15 @@ void AttachASNetwork(ASContext* context) {
                                     asCALL_CDECL);
     context->RegisterGlobalFunction("int SocketTCPSend(uint socket, const array<uint8>& data)",
                                     asFUNCTION(AS_SocketTCPSend),
+                                    asCALL_CDECL);
+    context->RegisterGlobalFunction("int SocketTCPSendString(uint socket, const string &in data)",
+                                    asFUNCTION(AS_SocketTCPSendString),
+                                    asCALL_CDECL);
+    context->RegisterGlobalFunction("string SocketTCPDataToString(const array<uint8> &in data)",
+                                    asFUNCTION(AS_SocketTCPDataToString),
+                                    asCALL_CDECL);
+    context->RegisterGlobalFunction("void SetAdaptiveAIPaused(bool paused)",
+                                    asFUNCTION(AS_SetAdaptiveAIPaused),
                                     asCALL_CDECL);
     context->RegisterGlobalFunction("bool IsValidSocketTCP(uint socket)",
                                     asFUNCTION(AS_IsValidSocketTCP),

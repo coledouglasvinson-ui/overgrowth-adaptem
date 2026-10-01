@@ -6493,7 +6493,7 @@ Path Engine::GetLatestLevelPath() {
 void Engine::CommitPause() {
     bool was_paused = paused;
     if (!Online::Instance()->IsActive()) {
-        paused = user_paused || menu_paused;
+        paused = user_paused || menu_paused || adaptive_ai_paused;
     } else {
         paused = false;
     }

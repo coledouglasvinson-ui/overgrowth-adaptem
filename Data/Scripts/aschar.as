@@ -56,6 +56,7 @@ int num_strikes = 0;
 float throw_weapon_time = -10.0f;
 
 int species = -1;
+bool adaptem_character = false;
 
 enum Species {
     _rabbit = 0,
@@ -3372,14 +3373,31 @@ vec3 GetRandomFurColor() {
     return FloatTintFromByte(fur_color_byte);
 }
 
+bool IsAdaptemCharacter() {
+    return adaptem_character;
+}
+
+void UpdateAdaptemCharacterFlag() {
+    string control_script = this_mo.GetCurrentControlScript();
+    adaptem_character = control_script == "adaptem_red_enemycontrol.as" ||
+                        control_script == "adaptem_blue_enemycontrol.as";
+}
+
 void RandomizeColors() {
     Object@ obj = ReadObjectFromID(this_mo.GetID());
+    string control_script = this_mo.GetCurrentControlScript();
 
     for(int i = 0; i < 4; ++i) {
         const string channel = character_getter.GetChannel(i);
 
         if(channel == "fur") {
-            obj.SetPaletteColor(i, GetRandomFurColor());
+            if(control_script == "adaptem_red_enemycontrol.as") {
+                obj.SetPaletteColor(i, vec3(0.85f, 0.08f, 0.08f));
+            } else if(control_script == "adaptem_blue_enemycontrol.as") {
+                obj.SetPaletteColor(i, vec3(0.08f, 0.25f, 0.95f));
+            } else {
+                obj.SetPaletteColor(i, GetRandomFurColor());
+            }
         } else if(channel == "cloth") {
             obj.SetPaletteColor(i, RandReasonableColor());
         }
@@ -5662,6 +5680,7 @@ void MakeMetalSparks(vec3 pos) {
 
 int HitByAttack(const vec3 &in dir, const vec3 &in pos, int attacker_id, float attack_damage_mult, float attack_knockback_mult) {
     bool was_unaware = (IsUnaware() == 1);
+    float health_before_attack = temp_health;
 
     if(!situation.KnowsAbout(attacker_id) && species == _wolf) {
         block_stunned = 1.0;
@@ -6120,6 +6139,15 @@ int HitByAttack(const vec3 &in dir, const vec3 &in pos, int attacker_id, float a
         if(sharp_damage > 0.0) {
             SetRagdollType(_RGDL_INJURED);
             injured_ragdoll_time = RangedRandomFloat(5.0, 8.0);
+        }
+    }
+
+    float health_damage = max(0.0f, health_before_attack - temp_health);
+    if(health_damage > 0.0f && attacker_id != -1 && ObjectExists(attacker_id)) {
+        MovementObject@ attacker = ReadCharacterID(attacker_id);
+        if(attacker.HasFunction("int IsAdaptiveCombatant()") &&
+           attacker.QueryIntFunction("int IsAdaptiveCombatant()") == 1) {
+            attacker.ReceiveScriptMessage("adaptive_rl_reward " + min(0.5f, health_damage * 0.5f));
         }
     }
 
@@ -8756,6 +8784,10 @@ void HandleGroundCollisions(const Timestep &in ts) {
             }
         }
 
+        if(ragdoll && !death && IsAdaptemCharacter() && length(this_mo.velocity) < 12.0f) {
+            ragdoll = false;
+        }
+
         if(old_adjust) {
             this_mo.velocity += bumper_collision_response / ts.step();  // Push away from wall, and apply velocity change verlet style
         }
@@ -11390,6 +11422,7 @@ void SwitchCharacter(string path) {
 }
 
 bool Init(string character_path) {
+    UpdateAdaptemCharacterFlag();
     Dispose();
     StartFootStance();
     this_mo.char_path = character_path;
@@ -11403,6 +11436,9 @@ bool Init(string character_path) {
         last_col_pos = this_mo.position;
         SetState(_movement_state);
         PostReset();
+        if(IsAdaptemCharacter()) {
+            RandomizeColors();
+        }
         return true;
     } else {
         Log(error, "Failed at loading character " + character_path);
@@ -11411,6 +11447,7 @@ bool Init(string character_path) {
 }
 
 void ScriptSwap() {
+    UpdateAdaptemCharacterFlag();
     last_col_pos = this_mo.position;
 }
 

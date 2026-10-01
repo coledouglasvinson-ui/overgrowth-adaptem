@@ -65,6 +65,8 @@ Level::~Level() {
 }
 
 void Level::Dispose() {
+    Engine::Instance()->adaptive_ai_paused = false;
+    Engine::Instance()->CommitPause();
     Message("dispose_level");
 
     for (auto& as_context : as_contexts_) {

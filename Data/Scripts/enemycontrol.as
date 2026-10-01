@@ -137,6 +137,16 @@ float sub_goal_pick_time = 0.0;
 AIGoal old_goal;
 AISubGoal old_sub_goal;
 
+const int kAdaptiveCombatStateCount = 8;
+const int kAdaptiveCombatActionCount = 4;
+array<float> adaptive_combat_q_values;
+array<int> adaptive_combat_action_visits;
+int adaptive_combat_last_state = -1;
+int adaptive_combat_last_action = -1;
+float adaptive_combat_pending_reward = 0.0f;
+bool adaptive_combat_table_loaded = false;
+bool adaptive_combat_terminal_reported = false;
+
 int investigate_target_id = -1;
 vec3 nav_target;
 int ally_id = -1;
@@ -317,6 +327,9 @@ void ResetMind() {
     got_hit_by_leg_cannon_count = 0;
     path_find_type = _pft_nav_mesh;
     float awake_time = 0.0f;
+    adaptive_combat_last_state = -1;
+    adaptive_combat_last_action = -1;
+    adaptive_combat_pending_reward = 0.0f;
 }
 
 int IsIdle() {
@@ -868,9 +881,28 @@ void HandleAIEvent(AIEvent event) {
             }
 
             break;
-        case _defeated:
+        case _defeated: {
+            if(IsAdaptemLearningCharacter() && !adaptive_combat_terminal_reported) {
+                RecordAdaptiveCombatReward(-1.0f);
+                EnsureAdaptiveCombatTable();
+                SyncAdaptiveCombatTable();
+                bool external_training_target = GetConfigValueBool("adaptive_ai_training") &&
+                                                level.GetIntVar("adaptive_ai_target_id") == this_mo.GetID();
+                int terminal_state = GetAdaptiveCombatState();
+                float terminal_reward = adaptive_combat_pending_reward;
+                if(external_training_target && adaptive_combat_last_action == -1) {
+                    terminal_reward -= 1.0f;
+                }
+                CompleteAdaptiveCombatDecision(GetAdaptiveCombatState(), false);
+                adaptive_combat_terminal_reported = true;
+                if(external_training_target) {
+                    level.SendMessage("adaptive_ai_transition " + this_mo.GetID() + " " + terminal_state + " " +
+                                      terminal_reward + " 1");
+                }
+            }
             AllyInfo();
             break;
+        }
         case _climbed_up:
             if(trying_to_climb == _climb_up) {
                 trying_to_climb = _nothing;
@@ -888,6 +920,7 @@ void HandleAIEvent(AIEvent event) {
             trying_to_climb = _jump;
             break;
         case _dodged:
+            RecordAdaptiveCombatReward(0.25f);
             throw_after_active_block = true;
             last_dodged_time = time;
             break;
@@ -895,9 +928,11 @@ void HandleAIEvent(AIEvent event) {
             last_throw_attempt_time = time;
             break;
         case _attack_failed:
+            RecordAdaptiveCombatReward(-0.25f);
             dont_attack_before = time + RangedRandomFloat(0.0, 1.4);
             break;
         case _activeblocked: {
+            RecordAdaptiveCombatReward(0.25f);
             float temp_block_followup = p_block_followup;
 
             if(sub_goal == _provoke_attack) {
@@ -938,6 +973,7 @@ void HandleAIEvent(AIEvent event) {
             break;
         }
         case _damaged:
+            RecordAdaptiveCombatReward(-0.5f);
             if(goal == _patrol && combat_allowed) {
                 Log(info, "Damaged!");
                 nav_target = this_mo.position;
@@ -1013,7 +1049,19 @@ void MindReceiveMessage(string msg) {
 
     string token = token_iter.GetToken(msg);
 
-    if(token == "escort_me") {
+    if(token == "adaptive_rl_action") {
+        token_iter.FindNextToken(msg);
+        int action = atoi(token_iter.GetToken(msg));
+        if(IsAdaptemLearningCharacter() && action >= 0 && action < kAdaptiveCombatActionCount) {
+            adaptive_combat_last_state = GetAdaptiveCombatState();
+            adaptive_combat_last_action = action;
+            adaptive_combat_pending_reward = 0.0f;
+            SetSubGoal(AdaptiveCombatAction(action));
+        }
+    } else if(token == "adaptive_rl_reward") {
+        token_iter.FindNextToken(msg);
+        RecordAdaptiveCombatReward(atof(token_iter.GetToken(msg)));
+    } else if(token == "escort_me") {
         token_iter.FindNextToken(msg);
         int id = atoi(token_iter.GetToken(msg));
         SetGoal(_escort);
@@ -1222,6 +1270,257 @@ void SetSubGoal(AISubGoal sub_goal_) {
     }
 
     sub_goal = sub_goal_;
+}
+
+int AdaptiveCombatActionIndex(AISubGoal candidate) {
+    switch(candidate) {
+        case _wait_and_attack: return 0;
+        case _rush_and_attack: return 1;
+        case _defend:          return 2;
+        case _provoke_attack:  return 3;
+    }
+
+    return -1;
+}
+
+string AdaptiveCombatProfileKey() {
+    string control_script = this_mo.GetCurrentControlScript();
+    if(control_script == "adaptem_red_enemycontrol.as") {
+        return "adaptem_red_combat_memory";
+    }
+    if(control_script == "adaptem_blue_enemycontrol.as") {
+        return "adaptem_blue_combat_memory";
+    }
+    return "";
+}
+
+bool IsAdaptemLearningCharacter() {
+    string control_script = this_mo.GetCurrentControlScript();
+    return control_script == "adaptem_red_enemycontrol.as" ||
+           control_script == "adaptem_blue_enemycontrol.as";
+}
+
+AISubGoal AdaptiveCombatAction(int action) {
+    switch(action) {
+        case 0: return _wait_and_attack;
+        case 1: return _rush_and_attack;
+        case 2: return _defend;
+        case 3: return _provoke_attack;
+    }
+
+    return _wait_and_attack;
+}
+
+void EnsureAdaptiveCombatTable() {
+    if(adaptive_combat_table_loaded) {
+        return;
+    }
+
+    int table_size = kAdaptiveCombatStateCount * kAdaptiveCombatActionCount;
+    adaptive_combat_q_values.resize(table_size);
+    adaptive_combat_action_visits.resize(table_size);
+
+    for(int i = 0; i < table_size; ++i) {
+        adaptive_combat_q_values[i] = 0.0f;
+        adaptive_combat_action_visits[i] = 0;
+    }
+
+    string key = AdaptiveCombatProfileKey();
+    string saved_data;
+    if(StorageHasString(key)) {
+        saved_data = StorageGetString(key);
+    } else {
+        saved_data = GetConfigValueString(key);
+    }
+
+    array<string> saved_values = saved_data.split(",");
+    if(int(saved_values.size()) == table_size * 2) {
+        for(int i = 0; i < table_size; ++i) {
+            adaptive_combat_q_values[i] = atof(saved_values[i * 2]);
+            adaptive_combat_action_visits[i] = atoi(saved_values[i * 2 + 1]);
+        }
+    }
+
+    adaptive_combat_table_loaded = true;
+    StorageSetString(key, AdaptiveCombatTableData());
+}
+
+string AdaptiveCombatTableData() {
+    string saved_values = "";
+    for(int i = 0; i < kAdaptiveCombatStateCount * kAdaptiveCombatActionCount; ++i) {
+        if(i > 0) {
+            saved_values += ",";
+        }
+        saved_values += "" + adaptive_combat_q_values[i] + "," + adaptive_combat_action_visits[i];
+    }
+    return saved_values;
+}
+
+int GetAdaptiveCombatTotalVisits() {
+    int total_visits = 0;
+    for(int i = 0; i < kAdaptiveCombatStateCount * kAdaptiveCombatActionCount; ++i) {
+        total_visits += adaptive_combat_action_visits[i];
+    }
+    return total_visits;
+}
+
+void SyncAdaptiveCombatTable() {
+    string key = AdaptiveCombatProfileKey();
+    if(!adaptive_combat_table_loaded || !StorageHasString(key)) {
+        return;
+    }
+
+    array<string> saved_values = StorageGetString(key).split(",");
+    int table_size = kAdaptiveCombatStateCount * kAdaptiveCombatActionCount;
+    if(int(saved_values.size()) != table_size * 2) {
+        return;
+    }
+
+    for(int i = 0; i < table_size; ++i) {
+        adaptive_combat_q_values[i] = atof(saved_values[i * 2]);
+        adaptive_combat_action_visits[i] = atoi(saved_values[i * 2 + 1]);
+    }
+}
+
+void SaveAdaptiveCombatTable() {
+    string key = AdaptiveCombatProfileKey();
+    if(!adaptive_combat_table_loaded) {
+        return;
+    }
+
+    string saved_data = AdaptiveCombatTableData();
+    StorageSetString(key, saved_data);
+    SetConfigValueString(key, saved_data);
+    SaveConfig();
+}
+
+int GetAdaptiveCombatState() {
+    int range_state = 1;
+    int weapon_state = 0;
+    int target_attacking = 0;
+
+    if(chase_target_id != -1 && ObjectExists(chase_target_id)) {
+        MovementObject@ target = ReadCharacterID(chase_target_id);
+        float target_distance = distance_squared(this_mo.position, target.position);
+        range_state = target_distance < 4.0f ? 0 : 1;
+        weapon_state = GetCharPrimaryWeapon(target) != -1 ? 1 : 0;
+        target_attacking = target.GetIntVar("state") == _attack_state ? 1 : 0;
+    }
+
+    return range_state * 4 + weapon_state * 2 + target_attacking;
+}
+
+int GetAdaptiveCombatStateForBridge() {
+    return GetAdaptiveCombatState();
+}
+
+int IsAdaptiveCombatant() {
+    if(IsAdaptemLearningCharacter() && knocked_out == _awake) {
+        adaptive_combat_terminal_reported = false;
+    }
+    return IsAdaptemLearningCharacter() &&
+                   !this_mo.controlled &&
+                   this_mo.GetIntVar("knocked_out") == _awake &&
+                   goal == _attack &&
+                   chase_target_id != -1 &&
+                   ObjectExists(chase_target_id)
+               ? 1
+               : 0;
+}
+
+float GetAdaptiveCombatMaxQ(int state_index) {
+    float max_q = adaptive_combat_q_values[state_index * kAdaptiveCombatActionCount];
+    for(int action = 1; action < kAdaptiveCombatActionCount; ++action) {
+        max_q = max(max_q, adaptive_combat_q_values[state_index * kAdaptiveCombatActionCount + action]);
+    }
+    return max_q;
+}
+
+void CompleteAdaptiveCombatDecision(int next_state, bool bootstrap) {
+    if(adaptive_combat_last_state == -1 || adaptive_combat_last_action == -1) {
+        return;
+    }
+
+    int index = adaptive_combat_last_state * kAdaptiveCombatActionCount + adaptive_combat_last_action;
+    float target_q = adaptive_combat_pending_reward;
+    if(bootstrap) {
+        target_q += 0.8f * GetAdaptiveCombatMaxQ(next_state);
+    }
+
+    adaptive_combat_q_values[index] += 0.2f * (target_q - adaptive_combat_q_values[index]);
+    adaptive_combat_action_visits[index] += 1;
+    SaveAdaptiveCombatTable();
+    adaptive_combat_pending_reward = 0.0f;
+    adaptive_combat_last_state = -1;
+    adaptive_combat_last_action = -1;
+}
+
+void RecordAdaptiveCombatReward(float reward) {
+    if(!IsAdaptemLearningCharacter() || this_mo.controlled || adaptive_combat_last_action == -1) {
+        return;
+    }
+
+    adaptive_combat_pending_reward += reward;
+}
+
+AISubGoal AdaptCombatSubGoal(AISubGoal fallback, bool allowed) {
+    if(!IsAdaptemLearningCharacter() || this_mo.controlled) {
+        return fallback;
+    }
+
+    EnsureAdaptiveCombatTable();
+    SyncAdaptiveCombatTable();
+
+    int state_index = GetAdaptiveCombatState();
+    int fallback_action = AdaptiveCombatActionIndex(fallback);
+    bool can_learn = allowed && fallback_action != -1;
+    bool external_training_target = GetConfigValueBool("adaptive_ai_training") &&
+                                    level.GetIntVar("adaptive_ai_target_id") == this_mo.GetID();
+    if(external_training_target && !can_learn) {
+        return fallback;
+    }
+
+    float transition_reward = adaptive_combat_pending_reward;
+    CompleteAdaptiveCombatDecision(state_index, can_learn);
+
+    if(!can_learn) {
+        return fallback;
+    }
+
+    if(external_training_target) {
+        level.SendMessage("adaptive_ai_transition " + this_mo.GetID() + " " + state_index + " " +
+                          transition_reward + " 0");
+        return fallback;
+    }
+
+    int selected_action = fallback_action;
+    int total_visits = GetAdaptiveCombatTotalVisits();
+    if(total_visits < 8) {
+        if(RangedRandomFloat(0.0f, 1.0f) < 0.2f) {
+            selected_action = int(RangedRandomFloat(0.0f, float(kAdaptiveCombatActionCount) - 0.01f));
+        }
+    } else {
+        if(RangedRandomFloat(0.0f, 1.0f) < 0.05f) {
+            selected_action = int(RangedRandomFloat(0.0f, float(kAdaptiveCombatActionCount) - 0.01f));
+        } else {
+            int fallback_index = state_index * kAdaptiveCombatActionCount + fallback_action;
+            float best_q = adaptive_combat_q_values[fallback_index];
+
+            for(int action = 0; action < kAdaptiveCombatActionCount; ++action) {
+                int index = state_index * kAdaptiveCombatActionCount + action;
+                if(action != fallback_action &&
+                   adaptive_combat_action_visits[index] >= 2 &&
+                   adaptive_combat_q_values[index] > best_q + 0.05f) {
+                    selected_action = action;
+                    best_q = adaptive_combat_q_values[index];
+                }
+            }
+        }
+    }
+
+    adaptive_combat_last_state = state_index;
+    adaptive_combat_last_action = selected_action;
+    return AdaptiveCombatAction(selected_action);
 }
 
 bool CheckRangeChange(const Timestep &in ts) {
@@ -1932,6 +2231,15 @@ void UpdateBrain(const Timestep &in ts) {
         }
 
         if(target_goal != _unknown) {
+            bool adaptive_allowed = combat_allowed &&
+                                    game_difficulty >= 0.25f &&
+                                    group_leader == -1 &&
+                                    dont_attack_before <= time &&
+                                    state != _ragdoll_state &&
+                                    state != _hit_reaction_state &&
+                                    target.GetBoolVar("on_ground") &&
+                                    distance_squared(target.position, this_mo.position) <= 16.0f;
+            target_goal = AdaptCombatSubGoal(target_goal, adaptive_allowed);
             SetSubGoal(target_goal);
         }
 

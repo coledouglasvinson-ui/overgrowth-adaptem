@@ -40,6 +40,8 @@ light_volume_lighting:  false
 global_time_scale_mult: 1.0
 game_difficulty:        1.0
 tutorials:              true
+adaptive_ai_training:   false
+adaptive_ai_training_port: 47852
 difficulty_set:         false
 volume_shadows:         false
 ssao:                   false

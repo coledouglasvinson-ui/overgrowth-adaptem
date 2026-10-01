@@ -191,6 +191,7 @@ class Engine : public ModLoadingCallback {
     bool paused;
     bool user_paused;
     bool menu_paused;
+    bool adaptive_ai_paused = false;
     bool slow_motion;
     bool check_save_level_changes_dialog_is_showing;
     bool check_save_level_changes_dialog_quit_if_not_cancelled;
